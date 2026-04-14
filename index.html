@@ -1198,7 +1198,7 @@ function submitForApproval(){
   pending2026.push({id,player:pName,rnd,holes:[...holes],submittedAt:new Date().toISOString(),entered,total});
   saveState();updatePendingCount();
   showToast(`✓ Submitted for approval — ${entered} holes, ${total} pts`,3500);
-  if(SCRIPT_URL)sheetsPost({action:'pending',year:2026,player:pName,rnd,holes,total});
+  if(SCRIPT_URL)sheetsPost({action:'pending',id,player:pName,rnd,holes:[...holes],total,submittedAt:new Date().toISOString(),entered});
 }
 
 function changeHandicap(val){
