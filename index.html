@@ -1580,9 +1580,16 @@ function clearAllScores(){
 }
 
 // ── GOOGLE SHEETS ─────────────────────────────────────────────
-function sheetsPost(payload){
+// No Content-Type header → defaults to text/plain (CORS-safelisted, avoids preflight).
+// No mode:'no-cors' → normal fetch so we can read responses and see errors.
+// GAS web apps return Access-Control-Allow-Origin:* so cross-origin requests work.
+async function sheetsPost(payload){
   if(!SCRIPT_URL)return;
-  fetch(SCRIPT_URL,{method:'POST',mode:'no-cors',body:JSON.stringify(payload)}).catch(e=>console.warn('Sheets:',e));
+  try{
+    const r=await fetch(SCRIPT_URL,{method:'POST',redirect:'follow',body:JSON.stringify(payload)});
+    const text=await r.text();
+    try{const d=JSON.parse(text);if(d.error)console.warn('Sheets error:',d.error);}catch(_){}
+  }catch(e){console.warn('Sheets POST failed:',e);}
 }
 // Sync full matchplay state to Sheets so player records persist in the cloud
 function saveMpToSheets(){
@@ -1612,7 +1619,7 @@ async function bulkUploadToSheets(){
   const rounds=[];
   TOURS.forEach(t=>t.scores.forEach(s=>rounds.push({year:t.year,location:t.location,country:t.country,flag:t.flag,player:s.player,r1:s.r1,r2:s.r2,r3:s.r3})));
   btn.textContent=`⬆ Uploading ${rounds.length}…`;btn.disabled=true;
-  await fetch(SCRIPT_URL,{method:'POST',mode:'no-cors',body:JSON.stringify({action:'bulkUpload',rounds})}).catch(()=>{});
+  await fetch(SCRIPT_URL,{method:'POST',redirect:'follow',body:JSON.stringify({action:'bulkUpload',rounds})}).catch(()=>{});
   btn.textContent='✓ Sent — verify in Sheet';
   btn.style.background='rgba(76,175,110,0.15)';btn.style.color='var(--green)';btn.style.borderColor='rgba(76,175,110,0.3)';
   setTimeout(()=>{statsLoaded=false;fetchStats();statsLoaded=true;},2000);
