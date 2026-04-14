@@ -403,6 +403,7 @@ tr:hover td{background:rgba(201,168,76,0.04);}
       <span class="section-title">Pending Approvals</span>
       <div class="section-rule"></div>
       <span id="pending-count" style="font-size:12px;color:var(--muted)"></span>
+      <button onclick="fetchPendingFromSheets(true).then(()=>buildPendingList())" style="font-size:11px;padding:4px 12px;border-radius:20px;background:var(--gold-dim);color:var(--gold);border:1px solid var(--gold-border);cursor:pointer;font-family:'DM Sans',sans-serif;white-space:nowrap;margin-left:8px;">↻ Refresh</button>
     </div>
     <div id="pending-list" style="margin-bottom:1.5rem">
       <div style="color:var(--muted);font-size:13px;padding:0.5rem 0">No pending submissions.</div>
@@ -1180,7 +1181,7 @@ function updateTotal(){
   document.getElementById('running-total').textContent=total||'—';
 }
 
-function submitForApproval(){
+async function submitForApproval(){
   const pName=draft.player||document.getElementById('sel-player').value;
   const rnd=draft.rnd||parseInt(document.getElementById('sel-round').value);
   if(!pName){showToast('Please select a player first');return;}
@@ -1190,15 +1191,37 @@ function submitForApproval(){
   if(pending2026.some(p=>p.player===pName&&p.rnd===rnd)){showToast('Already submitted — awaiting admin approval');return;}
 
   const player=PLAYERS_2026.find(p=>p.name===pName);
-  const course=COURSES[rnd];const ch=draft.ch!==undefined?draft.ch:player.ch[rnd-1];
+  const course=COURSES[rnd];
+  // Preserve the actual handicap used (including any override) so the
+  // approving admin uses the same value, even from a different device.
+  const ch=draft.ch!==undefined?draft.ch:player.ch[rnd-1];
   let total=0;
   holes.forEach((g,i)=>{if(!g)return;const h=course.holes[i];total+=calcStableford(g,h.par,getShots(ch,h.si))||0;});
 
   const id='s'+Date.now().toString(36);
-  pending2026.push({id,player:pName,rnd,holes:[...holes],submittedAt:new Date().toISOString(),entered,total});
+  const submittedAt=new Date().toISOString();
+
+  // Disable the button while the Sheets write is in-flight
+  const submitBtn=document.querySelector('button[onclick="submitForApproval()"]');
+  if(submitBtn){submitBtn.disabled=true;submitBtn.textContent='Submitting…';}
+
+  // Push to Sheets FIRST — only add to local state if Sheets write succeeds
+  let sheetsOk=false;
+  if(SCRIPT_URL){
+    sheetsOk=await sheetsPost({action:'pending',id,player:pName,rnd,holes:[...holes],ch,total,submittedAt,entered});
+  }
+
+  if(submitBtn){submitBtn.disabled=false;submitBtn.textContent='Submit for Approval';}
+
+  if(SCRIPT_URL&&!sheetsOk){
+    showToast('⚠ Could not reach Google Sheets — score NOT submitted. Check connection and try again.',5000);
+    return;
+  }
+
+  // Sheets confirmed (or no SCRIPT_URL — offline mode): persist locally
+  pending2026.push({id,player:pName,rnd,holes:[...holes],ch,submittedAt,entered,total});
   saveState();updatePendingCount();
   showToast(`✓ Submitted for approval — ${entered} holes, ${total} pts`,3500);
-  if(SCRIPT_URL)sheetsPost({action:'pending',id,player:pName,rnd,holes:[...holes],total,submittedAt:new Date().toISOString(),entered});
 }
 
 function changeHandicap(val){
@@ -1246,7 +1269,7 @@ function confirmPin(){
     document.getElementById('admin-save-btn').style.display='inline-block';
     buildLiveLeaderboard();buildMatchplayAdmin();
     // Pull pending queue from Sheets (cross-device source of truth), then render
-    fetchPendingFromSheets().then(()=>buildPendingList());
+    fetchPendingFromSheets(true).then(()=>buildPendingList());
   }else{
     document.getElementById('pin-error').style.display='block';
     const input=document.getElementById('pin-input');input.value='';input.focus();
@@ -1272,19 +1295,26 @@ function updatePendingCount(){
 }
 
 // Fetch pending queue from Google Sheets (authoritative cross-device source)
-async function fetchPendingFromSheets(){
+async function fetchPendingFromSheets(showStatus){
   if(!SCRIPT_URL)return;
+  const countEl=document.getElementById('pending-count');
+  if(showStatus&&countEl)countEl.textContent='Loading from Sheets…';
   try{
     const r=await fetch(SCRIPT_URL+'?action=getPending');
     if(!r.ok)throw new Error('HTTP '+r.status);
     const data=await r.json();
+    if(data.error)throw new Error(data.error);
     if(Array.isArray(data.pending)){
       // Sheets is the source of truth — replace local pending with server data
       pending2026=data.pending;
       saveState();
       updatePendingCount();
     }
-  }catch(e){console.warn('fetchPending:',e);}
+  }catch(e){
+    console.warn('fetchPending:',e);
+    if(showStatus&&countEl)countEl.textContent='⚠ Could not load from Sheets — showing local data';
+    // Fall back to whatever is in local state without overwriting it
+  }
 }
 
 function buildPendingList(){
@@ -1325,7 +1355,9 @@ function approveScore(id){
   pending2026.splice(idx,1);saveState();
   updatePendingCount();buildPendingList();buildLiveLeaderboard();buildTourLeaderboard();
   showToast(`✓ Approved: ${p.player} Round ${p.rnd}`);
-  saveRoundToSheets(p.player,p.rnd);
+  // Pass the handicap that was active when the player entered the score (Bug fix: was
+  // using draft.ch from the admin device, which is always wrong on a different device).
+  saveRoundToSheets(p.player,p.rnd,p.ch);
   sheetsPost({action:'deletePending',id:p.id});
 }
 function rejectScore(id){
@@ -1340,6 +1372,7 @@ function rejectScore(id){
 function clearPendingQueue(){
   showConfirm('Clear all pending submissions?',()=>{
     pending2026=[];saveState();buildPendingList();updatePendingCount();showToast('Pending queue cleared');
+    sheetsPost({action:'clearAllPending'});
   },'Clear');
 }
 
@@ -1583,29 +1616,50 @@ function clearAllScores(){
 // No Content-Type header → defaults to text/plain (CORS-safelisted, avoids preflight).
 // No mode:'no-cors' → normal fetch so we can read responses and see errors.
 // GAS web apps return Access-Control-Allow-Origin:* so cross-origin requests work.
+// Returns true on success, false on any error (so callers can react).
 async function sheetsPost(payload){
-  if(!SCRIPT_URL)return;
+  if(!SCRIPT_URL)return false;
   try{
     const r=await fetch(SCRIPT_URL,{method:'POST',redirect:'follow',body:JSON.stringify(payload)});
     const text=await r.text();
-    try{const d=JSON.parse(text);if(d.error)console.warn('Sheets error:',d.error);}catch(_){}
-  }catch(e){console.warn('Sheets POST failed:',e);}
+    try{
+      const d=JSON.parse(text);
+      if(d.error){console.warn('Sheets error:',d.error);return false;}
+    }catch(_){}
+    return r.ok;
+  }catch(e){console.warn('Sheets POST failed:',e);return false;}
 }
 // Sync full matchplay state to Sheets so player records persist in the cloud
 function saveMpToSheets(){
   if(!SCRIPT_URL)return;
-  // Build flat player records for easy sheet storage
-  const playerRecords=PLAYERS_2026.map(p=>{
+  // GAS saveMatchplay() expects: tourId, pairings[], playerStats[]
+  // Build pairings from all three rounds, tagged with round prefix
+  const pairings=[];
+  [1,2,3].forEach(r=>{
+    (matchplay[r].pairs||[]).forEach((p,i)=>{
+      pairings.push({
+        match:`R${r}M${i+1}`,
+        player1:p.shankers.join(' / '),
+        player2:p.toppers.join(' / '),
+        team1:'Shankers',
+        team2:'Toppers',
+        result:p.result||null,
+        margin:p.margin||''
+      });
+    });
+  });
+  const playerStats=PLAYERS_2026.map(p=>{
     const s=computeMpStats(p.name);
     return{player:p.name,team:p.team,...s};
   });
-  // Also include full raw pairings for complete fidelity
-  sheetsPost({action:'saveMatchplay',year:2026,matchplay,playerRecords});
+  sheetsPost({action:'saveMatchplay',tourId:'2026',pairings,playerStats});
 }
-function saveRoundToSheets(pName,rnd){
+function saveRoundToSheets(pName,rnd,overrideCh){
   if(!SCRIPT_URL)return;
   const player=PLAYERS_2026.find(p=>p.name===pName);if(!player)return;
-  const course=COURSES[rnd];const ch=draft.ch!==undefined?draft.ch:player.ch[rnd-1];
+  const course=COURSES[rnd];
+  // Priority: explicit override (from approved pending entry) > draft.ch (same-device direct save) > player default
+  const ch=overrideCh!==undefined?overrideCh:(draft.ch!==undefined?draft.ch:player.ch[rnd-1]);
   const saved=(scores2026[pName]||{})[rnd]||[];
   const holes=course.holes.map((h,i)=>{
     const g=saved[i]||0;const shots=g?getShots(ch,h.si):0;
