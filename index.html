@@ -151,6 +151,11 @@ tr:hover td{background:rgba(201,168,76,0.04);}
 .res-btn.act-t{background:rgba(232,132,122,0.2);color:var(--rose);border-color:rgba(232,132,122,0.4);}
 .margin-input{width:52px;padding:4px 6px;background:var(--card2);border:1px solid var(--gold-border);border-radius:4px;color:var(--text);font-size:11px;font-family:'DM Sans',sans-serif;text-align:center;}
 .margin-input::placeholder{color:var(--muted);}
+.hcp-override-input{width:48px;padding:3px 6px;background:var(--card2);border:1px solid var(--gold-border);border-radius:5px;color:var(--gold);font-size:13px;font-weight:600;font-family:'DM Sans',sans-serif;text-align:center;outline:none;transition:border-color 0.15s;}
+.hcp-override-input:focus{border-color:var(--gold);}
+.hcp-override-input.overridden{border-color:var(--gold);background:rgba(201,168,76,0.1);}
+.hcp-reset-btn{font-size:10px;padding:2px 8px;border-radius:10px;background:var(--gold-dim);color:var(--gold);border:1px solid var(--gold-border);cursor:pointer;font-family:'DM Sans',sans-serif;white-space:nowrap;}
+.hcp-reset-btn:hover{background:rgba(201,168,76,0.22);}
 
 /* ── PLAYER SELECT IN MATCHPLAY ── */
 .mp-player-sel{background:var(--card2);border-radius:4px;font-size:11px;padding:4px 6px;font-family:'DM Sans',sans-serif;width:100%;appearance:none;-webkit-appearance:none;cursor:pointer;}
@@ -588,7 +593,7 @@ let matchplay   = {
 };
 let mpEntryOpen = {1:false,2:false,3:false}; // track which rounds are expanded in admin
 
-let draft = {player:'',rnd:1,holes:Array(18).fill(0)};
+let draft = {player:'',rnd:1,holes:Array(18).fill(0),ch:undefined};
 
 function saveState(){
   localStorage.setItem('badgers2026',JSON.stringify({scores:scores2026,published,pending:pending2026,matchplay}));
@@ -1041,14 +1046,27 @@ function updateScorecard(){
 
   const player=PLAYERS_2026.find(p=>p.name===pName);
   const course=COURSES[rnd];
-  const ch=player.ch[rnd-1];
+  const defaultCh=player.ch[rnd-1];
 
-  hcpDiv.innerHTML=`<span style="color:var(--gold)">Course hcp: ${ch}</span> &nbsp;·&nbsp; ${course.name} &nbsp;·&nbsp; Par ${course.par} &nbsp;·&nbsp; CR ${course.cr} / Slope ${course.slope}`;
+  // Restore draft ch if same player/round, otherwise use default
+  const isRestoringDraft=(draft.player===pName&&draft.rnd===rnd);
+  const ch=(isRestoringDraft&&draft.ch!==undefined)?draft.ch:defaultCh;
+  const overridden=ch!==defaultCh;
+
+  hcpDiv.innerHTML=`<div style="display:flex;align-items:center;flex-wrap:wrap;gap:8px">
+    <span style="color:var(--muted);font-size:12px">Course hcp:</span>
+    <input id="hcp-override" type="number" min="0" max="54" value="${ch}"
+      class="hcp-override-input${overridden?' overridden':''}"
+      onchange="changeHandicap(parseInt(this.value)||0)"
+      title="Override course handicap (e.g. for yellow tees)">
+    ${overridden?`<button class="hcp-reset-btn" onclick="changeHandicap(${defaultCh})">↩ Reset to ${defaultCh}</button>`:''}
+    <span style="font-size:12px;color:var(--muted)">${overridden?`<span style="color:var(--gold);font-size:11px">(default: ${defaultCh}) &nbsp;·&nbsp;</span>`:''} ${course.name} &nbsp;·&nbsp; Par ${course.par} &nbsp;·&nbsp; CR ${course.cr} / Slope ${course.slope}</span>
+  </div>`;
 
   const approved=(scores2026[pName]||{})[rnd]||[];
-  const savedHoles=(draft.player===pName&&draft.rnd===rnd)?draft.holes:[];
+  const savedHoles=(isRestoringDraft)?draft.holes:[];
   const holes=Array(18).fill(0).map((_,i)=>approved[i]||savedHoles[i]||0);
-  draft={player:pName,rnd,holes};
+  draft={player:pName,rnd,holes,ch};
   saveDraft();
 
   let html=`<table class="sc-table"><thead><tr>
@@ -1121,7 +1139,7 @@ function refreshHole(i){
   if(!player)return;
   const course=COURSES[rnd];
   const h=course.holes[i];
-  const ch=player.ch[rnd-1];
+  const ch=draft.ch!==undefined?draft.ch:player.ch[rnd-1];
   const gross=draft.holes[i]||0;
   const shots=getShots(ch,h.si);
   const pts=gross?calcStableford(gross,h.par,shots):null;
@@ -1155,7 +1173,7 @@ function updateTotal(){
   const rnd=draft.rnd||parseInt(document.getElementById('sel-round').value);
   if(!pName){document.getElementById('running-total').textContent='—';return;}
   const player=PLAYERS_2026.find(p=>p.name===pName);
-  const course=COURSES[rnd];const ch=player.ch[rnd-1];
+  const course=COURSES[rnd];const ch=draft.ch!==undefined?draft.ch:player.ch[rnd-1];
   const holes=draft.player===pName?draft.holes:Array(18).fill(0);
   let total=0;
   holes.forEach((g,i)=>{if(!g)return;const h=course.holes[i];total+=calcStableford(g,h.par,getShots(ch,h.si))||0;});
@@ -1172,7 +1190,7 @@ function submitForApproval(){
   if(pending2026.some(p=>p.player===pName&&p.rnd===rnd)){showToast('Already submitted — awaiting admin approval');return;}
 
   const player=PLAYERS_2026.find(p=>p.name===pName);
-  const course=COURSES[rnd];const ch=player.ch[rnd-1];
+  const course=COURSES[rnd];const ch=draft.ch!==undefined?draft.ch:player.ch[rnd-1];
   let total=0;
   holes.forEach((g,i)=>{if(!g)return;const h=course.holes[i];total+=calcStableford(g,h.par,getShots(ch,h.si))||0;});
 
@@ -1181,6 +1199,13 @@ function submitForApproval(){
   saveState();updatePendingCount();
   showToast(`✓ Submitted for approval — ${entered} holes, ${total} pts`,3500);
   if(SCRIPT_URL)sheetsPost({action:'pending',year:2026,player:pName,rnd,holes,total});
+}
+
+function changeHandicap(val){
+  if(!draft.player)return;
+  draft.ch=val;
+  saveDraft();
+  updateScorecard();
 }
 
 function adminDirectSave(){
@@ -1553,7 +1578,7 @@ function saveMpToSheets(){
 function saveRoundToSheets(pName,rnd){
   if(!SCRIPT_URL)return;
   const player=PLAYERS_2026.find(p=>p.name===pName);if(!player)return;
-  const course=COURSES[rnd];const ch=player.ch[rnd-1];
+  const course=COURSES[rnd];const ch=draft.ch!==undefined?draft.ch:player.ch[rnd-1];
   const saved=(scores2026[pName]||{})[rnd]||[];
   const holes=course.holes.map((h,i)=>{
     const g=saved[i]||0;const shots=g?getShots(ch,h.si):0;
